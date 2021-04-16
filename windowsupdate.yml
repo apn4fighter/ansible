@@ -1,0 +1,103 @@
+####### Get the current time stamp from the server. Change it accordingly to your time zone ##########
+- name: new variable with current date time, Original time minues seven hours to get PDT time
+  set_fact: temp="{{lookup('pipe','date -d \"-8 hours\" +%Y-%m-%d_%H-%M\')}}"
+  ignore_errors: yes
+
+- name: Search the Updades and send the list to C drive
+  win_updates:
+              category_names:
+                - Application
+                - Connectors
+                - DefinitionUpdates
+                - DeveloperKits
+                - FeaturePacks
+                - Guidance
+                - ServicePacks
+                - Tools
+                - SecurityUpdates
+                - CriticalUpdates
+                - UpdateRollups
+                - Updates
+              state: installed
+              log_path: C:\Monthly_Win_Updates\{{ inventory_hostname}}updates_{{ temp }}.txt
+              reboot: yes
+              reboot_timeout: 1800    
+
+  register: InstalledUpdates_results
+
+#### This Section checks if a reboot is required or not after installing updates?
+- name: After installing the updates Check if a reboot is required?
+  win_reboot:
+                reboot_timeout: 1800
+  when: InstalledUpdates_results.reboot_required
+  ignore_errors: yes
+
+- debug: 
+        msg : Reboot for  {{ inventory_hostname }} is not required at this time
+  when:  InstalledUpdates_results.found_update_count|int < 1  
+
+### The following block will run if update count is at least 1 ##########
+
+- when: InstalledUpdates_results.found_update_count|int >= 1
+  block:
+      
+    - name: update count was at least 1. Host machine must be restarted to install updates
+      debug: 
+        msg : Reboot for {{ inventory_hostname }} is required at this time
+
+#### This section checks if the services are running after reboot
+
+    - name: Ensure WinRM starts when the system has settled and is ready to work reliably
+      win_service:
+        name: WinRM
+        start_mode: delayed
+      register: serviceresult
+      ignore_errors: yes
+
+    - debug: msg='service {{ serviceresult.name }} is running on, {{ inventory_hostname }}'
+      when: serviceresult.state == 'running'  
+
+    - debug: msg='service {{ serviceresult.name }}  is Stopped on, {{ inventory_hostname }}'
+      when: serviceresult.state == 'stopped' 
+    
+### This sections copies the update results and service check results into C drive    
+    - name: save the out of service status into C Drive too
+      win_copy: 
+        content: | 
+                 "Service {{serviceresult.name }} is {{ serviceresult.state }} on {{ inventory_hostname }} \n
+                 Following updates were detected and installed {{ InstalledUpdates_results }} \n"  
+        dest: C:\Monthly_Win_Updates\{{inventory_hostname}}_{{temp}}.txt
+      ignore_errors: yes  
+ 
+########## The copy command below will check if server belongs to BINC or biotronik and save to the right share location. This will also create a batch file
+#### replace the network share and folder name per your choice
+    - name: Copying the updates output on this host to a batch file
+      win_copy:
+              content: "copy C:\\Monthly_Win_Updates\\{{inventory_hostname}}_{{temp}}.txt \\\\soong\\CISManagement\\CIS\\CIN\\Projects\\Ansible\\dataoutput\\{{inventory_hostname}}_{{temp}}.txt & copy C:\\Monthly_Win_Updates\\{{inventory_hostname}}_{{temp}}.txt \\\\pacer\\CIS\\AnsibleOutput\\{{inventory_hostname}}_{{temp}}.txt"
+              dest: C:\Monthly_Win_Updates\ansiblerobo.bat
+      ignore_errors: yes
+
+      
+#######   Batch file will then be executed
+    - name: Execute the batch file to save the output to the network share
+      win_command: C:\Monthly_Win_Updates\ansiblerobo.bat
+      become: yes
+      become_method: runas
+      become_user: SYSTEM
+      ignore_errors: yes
+
+#### Notification of the main items will be sent over to Slack. Showing which user ran these tasks.    
+#### remove this section if you dont want slack notifications
+    - name: Send Slack Notification
+      slack: 
+        token: replace this token with your own
+        ###### replace the below channel with your own. Read how to setup Slack notification. 
+        channel: "#ansible-notifications"
+        msg: 
+          - "Windows Update Task started by {{ vcenter_username }}"
+          - "Task completed on {{ inventory_hostname }} are"
+          - "Updates installed {{ InstalledUpdates_results }} "
+          - "Service WinRM status is {{ serviceresult.state }} "   
+        domain: bcs-us.slack.com  
+      delegate_to: 127.0.0.1
+      ignore_errors: yes  
